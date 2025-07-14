@@ -1,6 +1,9 @@
 # Ignore environment config
 .env
 
+#fichero de ejemplo
+prueba.txt
+
 # Ignore virtual environments
 sdk_venv/
 .venv/
