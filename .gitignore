@@ -1,8 +1,11 @@
 # Ignore environment config
 .env
 
-#fichero de ejemplo
+# Fichero de ejemplo
 prueba.txt
+
+# No incluir gitignore
+.gitignore
 
 # Ignore virtual environments
 sdk_venv/
