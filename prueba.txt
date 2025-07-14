@@ -1,3 +1,0 @@
-Fichero de pruebas de TTKIA SDK
-Incluye información dummy para verificar que es adjuntado a la conversación.
-Sin más.
