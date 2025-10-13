@@ -2,7 +2,8 @@ import os
 from dotenv import load_dotenv
 from ttkia_sdk.client import TtkIAAssistant
 import time
-
+from typing import Optional, List, Dict, Any, Union
+ 
 # Cargar variables de entorno desde .env
 load_dotenv()
 

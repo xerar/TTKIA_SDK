@@ -567,3 +567,196 @@ class TtkIAAssistant:
         except Exception as e:
             self.logger.error(f"Error borrando conversación {conversation_id}: {e}")
             return False
+
+    def get_quick_commands(self) -> Dict[str, Any]:
+        """
+        Obtiene TODOS los quick commands disponibles (propios y públicos).
+        
+        Returns:
+            Dict con estructura:
+            {
+                "success": bool,
+                "commands": [...],           # Lista de tus comandos
+                "public_commands": [...],    # Lista de comandos públicos de otros usuarios
+                "total": int,
+                "max_commands": int,
+                "available_slots": int
+            }
+            
+            Cada comando contiene:
+            - name: str
+            - description: str
+            - prompt: str
+            - usage_count: int
+            - is_public: bool
+            - author: str (solo en públicos)
+        """
+        try:
+            response = self._make_request("GET", "/commands/list")
+            data = response.json()
+            
+            my_commands = data.get('commands', [])
+            public_commands = data.get('public_commands', [])
+            
+            self.logger.info(
+                f"Comandos obtenidos: {len(my_commands)} propios, "
+                f"{len(public_commands)} públicos"
+            )
+            
+            return data
+            
+        except Exception as e:
+            self.logger.error(f"Error obteniendo quick commands: {e}")
+            return {
+                "success": False,
+                "commands": [],
+                "public_commands": [],
+                "total": 0,
+                "max_commands": 50,
+                "available_slots": 50
+            }
+
+
+    def use_command(
+        self,
+        command_name: str,
+        additional_context: str = "",
+        conversation_id: Optional[str] = None,
+        web_search: bool = False,
+        teacher_mode: bool = False,
+        style: str = "concise",
+        prompt: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Ejecuta un quick command (propio o público).
+        
+        El comando se ejecuta en el contexto del workspace especificado.
+        Si el workspace tiene archivos adjuntos, el comando los usará automáticamente.
+        
+        Args:
+            command_name: Nombre del comando (con o sin /)
+            additional_context: Contexto adicional para el comando (opcional)
+            conversation_id: ID del workspace/conversación (opcional)
+                            - Si se proporciona: usa ese workspace
+                            - Si no se proporciona: usa el workspace activo o crea uno nuevo
+            web_search: Activar búsqueda web (default: False)
+            teacher_mode: Activar modo profesor - query extendida + CoT (default: False)
+            style: Estilo de respuesta - concise, detailed, technical, etc. (default: "concise")
+            prompt: Prompt específico a usar (default: usa "default")
+            
+        Returns:
+            Dict con la respuesta del asistente:
+            {
+                'success': bool,
+                'conversation_id': str,
+                'message_id': str,
+                'query': str,
+                'response_text': str,      # ← LA RESPUESTA
+                'confidence': float,
+                'recommended_response': str,
+                'query_extended': str,     # Si teacher_mode=True
+                'timing': dict,
+                'docs': list,
+                'webs': list,
+                'links': list,
+                'thinking_process': list   # Si teacher_mode=True
+            }
+            
+        Raises:
+            ValueError: Si el comando no existe
+            
+        Examples:
+            >>> # Comando simple
+            >>> result = client.use_command("analizar_logs")
+            >>> print(result['response_text'])
+            
+            >>> # Con contexto adicional
+            >>> result = client.use_command(
+            ...     "analizar_logs",
+            ...     additional_context="Error en línea 245"
+            ... )
+            
+            >>> # Con búsqueda web para info actualizada
+            >>> result = client.use_command(
+            ...     "vulnerabilidades_cisco",
+            ...     web_search=True
+            ... )
+            
+            >>> # Modo profesor para aprender paso a paso
+            >>> result = client.use_command(
+            ...     "catalyst",
+            ...     teacher_mode=True,
+            ...     style="detailed"
+            ... )
+            
+            >>> # Comando en workspace específico con todas las opciones
+            >>> result = client.use_command(
+            ...     "diagnostico_red",
+            ...     additional_context="IP: 192.168.1.100",
+            ...     conversation_id="conv-123",
+            ...     web_search=True,
+            ...     teacher_mode=True,
+            ...     style="technical"
+            ... )
+        """
+        # Buscar el comando (propio o público)
+        clean_name = command_name.lower().lstrip('/')
+        
+        commands_data = self.get_quick_commands()
+        cmd = None
+        
+        # Buscar en comandos propios
+        for c in commands_data.get('commands', []):
+            if c['name'].lower() == clean_name:
+                cmd = c
+                break
+        
+        # Si no está en propios, buscar en públicos
+        if not cmd:
+            for c in commands_data.get('public_commands', []):
+                if c['name'].lower() == clean_name:
+                    cmd = c
+                    break
+        
+        # Error si no existe
+        if not cmd:
+            available_commands = [c['name'] for c in commands_data.get('commands', [])]
+            available_public = [c['name'] for c in commands_data.get('public_commands', [])]
+            
+            error_msg = f"❌ Comando '/{clean_name}' no encontrado.\n\n"
+            if available_commands:
+                error_msg += f"Tus comandos disponibles: {', '.join(f'/{c}' for c in available_commands[:5])}\n"
+            if available_public:
+                error_msg += f"Comandos públicos: {', '.join(f'/{c}' for c in available_public[:5])}"
+            
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        # Construir query: prompt del comando + contexto adicional
+        query_text = cmd['prompt']
+        if additional_context:
+            query_text = f"{query_text}\n\nContexto adicional:\n{additional_context}"
+        
+        # Log de ejecución con configuración
+        cmd_type = "propio" if not cmd.get('author') else f"público (by {cmd['author']})"
+        config_info = []
+        if web_search:
+            config_info.append("web_search")
+        if teacher_mode:
+            config_info.append("teacher_mode")
+        if style != "concise":
+            config_info.append(f"style={style}")
+        
+        config_str = f" [{', '.join(config_info)}]" if config_info else ""
+        self.logger.info(f"Ejecutando comando /{cmd['name']} ({cmd_type}){config_str}")
+        
+        # Ejecutar usando query() con todas las opciones
+        return self.query(
+            query_text=query_text,
+            conversation_id=conversation_id,
+            prompt=prompt or "default",
+            style=style,
+            teacher_mode=teacher_mode,
+            web_search=web_search,
+            title=f"Comando: /{cmd['name']}"
+        )
