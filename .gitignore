@@ -1,0 +1,26 @@
+# Ignorar Documentos y DB
+Repository/
+docs/
+DataBase/
+logs/
+tests/
+monitoring/
+
+# Ignorar directorios __pycache__
+__pycache__/
+
+# Ignorar archivos de caché de Python
+*.pyc
+*.pyo
+*.pyd
+
+# Ignorar entornos virtuales
+venv/
+env/
+new_venv/
+
+# Ignorar el nohup
+nohup.out
+
+# Variables de entorno
+.env
