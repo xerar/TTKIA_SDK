@@ -287,74 +287,98 @@ class TtkIAAssistant:
         self,
         file_path: str,
         conversation_id: Optional[str] = None,
-        custom_filename: Optional[str] = None
+        custom_filename: Optional[str] = None,
+        wait_for_embedding: bool = False,
+        max_wait: int = 600,
+        poll_interval: int = 10
     ) -> Dict[str, Any]:
         """
-        Sube un archivo al workspace/conversación especificada.
-        
+        Sube un archivo al workspace/conversación especificada, opcionalmente
+        esperando hasta que el embedding (procesamiento) se complete.
+
         Args:
-            file_path: Ruta al archivo local que se desea subir
-            conversation_id: ID de la conversación (opcional, se usará el activo si no se especifica)
-            custom_filename: Nombre personalizado para el archivo (opcional)
-            
+            file_path: Ruta al archivo local que se desea subir.
+            conversation_id: ID de la conversación (opcional).
+            custom_filename: Nombre personalizado para el archivo (opcional).
+            wait_for_embedding: Si True, hace polling hasta que el archivo esté 'completed'.
+            max_wait: Tiempo máximo de espera en segundos (solo si wait_for_embedding=True).
+            poll_interval: Intervalo entre comprobaciones en segundos.
+
         Returns:
-            Diccionario con información del archivo subido
-            
+            Diccionario con información del archivo subido (y embebido, si se espera).
+
         Raises:
-            FileNotFoundError: Si el archivo especificado no existe
-            requests.RequestException: En caso de error en la petición
+            FileNotFoundError: Si el archivo no existe.
+            requests.RequestException: En caso de error en la petición.
+            TimeoutError: Si el embedding no se completa dentro de max_wait segundos.
         """
-        import os
         from pathlib import Path
-        
+        import time
+
+        file_path_obj = Path(file_path)
+        if not file_path_obj.exists():
+            raise FileNotFoundError(f"El archivo {file_path} no existe")
+
+        filename = custom_filename or file_path_obj.name
+        file_size = file_path_obj.stat().st_size
+        self.logger.info(f"Subiendo archivo: {filename} ({file_size} bytes)")
+
+        files = {
+            'file': (filename, open(file_path_obj, 'rb'), self._get_content_type(file_path_obj))
+        }
+
+        data = {}
+        if conversation_id:
+            data['conversation_id'] = conversation_id
+
         try:
-            # Verificar que el archivo existe
-            file_path_obj = Path(file_path)
-            if not file_path_obj.exists():
-                raise FileNotFoundError(f"El archivo {file_path} no existe")
-            
-            # Obtener información del archivo
-            filename = custom_filename or file_path_obj.name
-            file_size = file_path_obj.stat().st_size
-            
-            self.logger.info(f"Subiendo archivo: {filename} ({file_size} bytes)")
-            
-            # Preparar los datos del formulario
-            files = {
-                'file': (filename, open(file_path_obj, 'rb'), self._get_content_type(file_path_obj))
-            }
-            
-            data = {}
-            if conversation_id:
-                data['conversation_id'] = conversation_id
-            
-            # Realizar la petición
             response = self.session.post(
                 f"{self.base_url}/chat-upload",
                 files=files,
                 data=data,
                 timeout=self.timeout
             )
-            
-            # Cerrar el archivo
+        finally:
+            # cerrar handle abierto incluso si falla la subida
             files['file'][1].close()
-            
-            self.logger.debug(f"Respuesta del servidor: {response.status_code}")
-            response.raise_for_status()
-            
-            result = response.json()
-            
-            self.logger.info(f"Archivo subido exitosamente: {result.get('name', filename)}")
-            self.logger.debug(f"Información del archivo: {result}")
-            
+
+        response.raise_for_status()
+        result = response.json()
+        self.logger.info(f"Archivo subido exitosamente: {result.get('name', filename)}")
+
+        # Si no se pide esperar, devolvemos directamente
+        if not wait_for_embedding:
             return result
-            
-        except FileNotFoundError:
-            self.logger.error(f"Archivo no encontrado: {file_path}")
-            raise
-        except Exception as e:
-            self.logger.error(f"Error subiendo archivo {file_path}: {e}")
-            raise
+
+        # -------------------------------
+        # Espera activa hasta 'completed'
+        # -------------------------------
+        start = time.time()
+        name_to_check = result.get("name", filename)
+        conv_id = conversation_id or result.get("conversation_id")
+
+        if not conv_id:
+            self.logger.warning("⚠️ No se pudo asignar conversation_id; no se puede esperar embedding.")
+            return result
+
+        self.logger.info(f"⌛ Esperando embedding de '{name_to_check}'... (timeout={max_wait}s)")
+        while time.time() - start < max_wait:
+            try:
+                attachments = self.get_attachments(conv_id)
+                for att in attachments:
+                    if att.get("name") == name_to_check and att.get("status") == "completed":
+                        elapsed = round(time.time() - start, 1)
+                        self.logger.info(f"✅ Embedding completado tras {elapsed}s: {name_to_check}")
+                        result["embedding_status"] = "completed"
+                        result["embedding_waited"] = True
+                        return result
+            except Exception as e:
+                self.logger.warning(f"⚠️ Error comprobando adjuntos: {e}")
+            time.sleep(poll_interval)
+
+        raise TimeoutError(
+            f"⏱️ Timeout esperando a que '{name_to_check}' se complete ({max_wait}s)"
+        )
 
     def _get_content_type(self, file_path: Path) -> str:
         """
